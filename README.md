@@ -1,15 +1,39 @@
 # web-novel-scraper
 
-A personal web scraper for web novels
+A personal web scraper for web novels that creates EPUB files.
 
-## How to run:
+## How to run
 
-### Scraper 1
+### GUI launcher
 
-This script scrapes novels from www.readnovelfull.com  
-scraper 1 - `python scraper\ 1 https://readnovelfull.com/heaven-officials-blessing-novel.html --all`
+```bash
+python main.py
+```
 
-### Scraper 2
+The launcher supports:
 
-This script scrapes novels from www.webnoveltranslations.com  
-scraper 2 - `python scraper\ 2 https://webnoveltranslations.com/novel/the-reincarnated-assassin-is-a-genius-swordsman/ all`
+- ReadNovelFull
+- WebNovelTranslations
+- NovelBin
+
+### Individual scrapers
+
+ReadNovelFull:
+
+```bash
+python readnovelfull.py https://readnovelfull.com/heaven-officials-blessing-novel.html --all
+```
+
+WebNovelTranslations:
+
+```bash
+python webnoveltranslations.py https://webnoveltranslations.com/novel/the-reincarnated-assassin-is-a-genius-swordsman/ all
+```
+
+NovelBin:
+
+```bash
+python novelbin.py https://novelbin.com/b/the-warriors-ballad/ 5
+```
+
+Use `all` instead of a number to scrape every available chapter.
