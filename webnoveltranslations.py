@@ -10,11 +10,64 @@ import re
 import os
 import ebooklib
 from ebooklib import epub
+from urllib.parse import urljoin
 
 # Set up headers to mimic a browser request
 headers = {
     'User-Agent': 'Mozilla/50 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
 }
+
+def get_image_url(soup, base_url):
+    """
+    Finds the novel cover image URL from the detail page.
+    """
+    cover_tag = (
+        soup.select_one('meta[property="og:image"]')
+        or soup.select_one('.summary_image img')
+        or soup.select_one('.novel-cover img')
+        or soup.select_one('.post-thumbnail img')
+        or soup.select_one('img.wp-post-image')
+    )
+    if not cover_tag:
+        return None
+
+    image_url = (
+        cover_tag.get('content')
+        or cover_tag.get('data-src')
+        or cover_tag.get('data-original')
+        or cover_tag.get('src')
+    )
+    return urljoin(base_url, image_url) if image_url else None
+
+def get_cover_filename(response):
+    """
+    Chooses a cover filename based on the response content type.
+    """
+    content_type = response.headers.get('content-type', '').lower()
+    if 'png' in content_type:
+        return 'cover.png'
+    if 'webp' in content_type:
+        return 'cover.webp'
+    return 'cover.jpg'
+
+def add_cover(book, cover_url):
+    """
+    Downloads and embeds the novel cover in the EPUB.
+    """
+    if not cover_url:
+        print("No cover image found.")
+        return
+
+    try:
+        response = requests.get(cover_url, headers=headers, timeout=20)
+        response.raise_for_status()
+        if not response.headers.get('content-type', '').lower().startswith('image/'):
+            print(f"Cover URL did not return an image: {cover_url}")
+            return
+        book.set_cover(get_cover_filename(response), response.content)
+        print(f"Added cover image: {cover_url}")
+    except requests.exceptions.RequestException as e:
+        print(f"Failed to download cover image: {e}")
 
 def scrape_chapter(url):
     """
@@ -111,8 +164,41 @@ def get_novel_title(novel_url):
         print(f"Error fetching novel title: {e}")
     return "Unknown Novel"
 
+def get_novel_info(novel_url):
+    """
+    Scrapes the novel title, author, and cover image from the main page.
+    """
+    try:
+        response = requests.get(novel_url, headers=headers)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.content, 'html.parser')
 
-def create_epub(novel_data, novel_title, novel_author, output_filename):
+        title_tag = soup.select_one('h1.post-title') or soup.select_one('h1.novel-title')
+        title_meta = soup.select_one('meta[property="og:title"]')
+        if title_tag:
+            novel_title = title_tag.text.strip()
+        elif title_meta and title_meta.get('content'):
+            novel_title = title_meta['content'].split(' - ')[0].strip()
+        elif soup.title and soup.title.string:
+            novel_title = soup.title.string.split(' - ')[0].strip()
+        else:
+            novel_title = "Unknown Novel"
+
+        author_tag = (
+            soup.select_one('ul.novel-info li:nth-of-type(2) a')
+            or soup.select_one('a[href*="/author/"]')
+            or soup.select_one('a[href*="/authors/"]')
+        )
+        novel_author = author_tag.text.strip() if author_tag else "Web Novel Scraper"
+
+        cover_url = get_image_url(soup, novel_url)
+        return novel_title, novel_author, cover_url
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching novel info: {e}")
+        return "Unknown Novel", "Web Novel Scraper", None
+
+
+def create_epub(novel_data, novel_title, novel_author, output_filename, cover_url=None):
     """
     Creates an EPUB file from the scraped novel data.
     """
@@ -124,6 +210,7 @@ def create_epub(novel_data, novel_title, novel_author, output_filename):
     book.set_title(novel_title)
     book.set_language('en')
     book.add_author(novel_author)
+    add_cover(book, cover_url)
 
     chapters = []
     for i, chapter_data in enumerate(novel_data):
@@ -158,8 +245,7 @@ if __name__ == "__main__":
     parser.add_argument('chapters_to_scrape', type=str, help='Number of chapters to scrape from the start, or "all" for all chapters.')
     args = parser.parse_args()
     
-    novel_title = get_novel_title(args.novel_url)
-    novel_author = "Web Novel Scraper"
+    novel_title, novel_author, cover_url = get_novel_info(args.novel_url)
     
     chapter_urls = get_chapter_links(args.novel_url)
     
@@ -187,6 +273,6 @@ if __name__ == "__main__":
         
         if scraped_chapters:
             output_filename = f"{novel_title.replace(' ', '_')}.epub"
-            create_epub(scraped_chapters, novel_title, novel_author, output_filename)
+            create_epub(scraped_chapters, novel_title, novel_author, output_filename, cover_url=cover_url)
     else:
         print("\nFailed to get chapter links. Exiting.")

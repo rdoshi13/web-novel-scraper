@@ -56,6 +56,59 @@ def fetch_soup(url):
     return parse_html(response.content)
 
 
+def get_image_url(soup, base_url):
+    """
+    Finds the novel cover image URL from the detail page.
+    """
+    cover_tag = (
+        soup.select_one('.book img')
+        or soup.select_one('meta[property="og:image"]')
+        or soup.select_one('img[itemprop="image"]')
+    )
+    if not cover_tag:
+        return None
+
+    image_url = (
+        cover_tag.get('content')
+        or cover_tag.get('data-src')
+        or cover_tag.get('data-original')
+        or cover_tag.get('src')
+    )
+    return urljoin(base_url, image_url) if image_url else None
+
+
+def get_cover_filename(response):
+    """
+    Chooses a cover filename based on the response content type.
+    """
+    content_type = response.headers.get("content-type", "").lower()
+    if "png" in content_type:
+        return "cover.png"
+    if "webp" in content_type:
+        return "cover.webp"
+    return "cover.jpg"
+
+
+def add_cover(book, cover_url, log=None):
+    """
+    Downloads and embeds the novel cover in the EPUB.
+    """
+    if not cover_url:
+        log_message("No cover image found.", log)
+        return
+
+    try:
+        response = session.get(cover_url, timeout=20)
+        response.raise_for_status()
+        if not response.headers.get("content-type", "").lower().startswith("image/"):
+            log_message(f"Cover URL did not return an image: {cover_url}", log)
+            return
+        book.set_cover(get_cover_filename(response), response.content)
+        log_message(f"Added cover image: {cover_url}", log)
+    except requests.exceptions.RequestException as e:
+        log_message(f"Failed to download cover image: {e}", log)
+
+
 def clean_chapter_html(content_tag):
     """
     Removes unwanted elements and returns cleaned chapter HTML.
@@ -108,7 +161,9 @@ def get_novel_info(novel_url):
     author_tag = soup.select_one(".info-meta a[href*='/a/']")
     author_name = author_tag.get_text(strip=True) if author_tag else "Unknown Author"
 
-    return novel_title, author_name, soup
+    cover_url = get_image_url(soup, novel_url)
+
+    return novel_title, author_name, cover_url, soup
 
 
 def get_first_chapter_url(novel_url, soup=None):
@@ -183,12 +238,12 @@ def scrape_novel(novel_url, chapters_to_scrape, wait_time=0, log=None):
     """
     Scrapes chapters by starting at the first chapter and following NovelBin's next links.
     """
-    novel_title, novel_author, novel_soup = get_novel_info(novel_url)
+    novel_title, novel_author, cover_url, novel_soup = get_novel_info(novel_url)
     first_chapter_url = get_first_chapter_url(novel_url, novel_soup)
 
     if not first_chapter_url:
         log_message("Failed to find the first chapter URL.", log)
-        return novel_title, novel_author, []
+        return novel_title, novel_author, cover_url, []
 
     scrape_all = chapters_to_scrape.lower() == "all"
     chapter_limit = None
@@ -198,11 +253,11 @@ def scrape_novel(novel_url, chapters_to_scrape, wait_time=0, log=None):
             chapter_limit = int(chapters_to_scrape)
         except ValueError:
             log_message("Invalid input for number of chapters. Please use a number or 'all'.", log)
-            return novel_title, novel_author, []
+            return novel_title, novel_author, cover_url, []
 
         if chapter_limit <= 0:
             log_message("Please provide a positive number of chapters.", log)
-            return novel_title, novel_author, []
+            return novel_title, novel_author, cover_url, []
 
     chapter_url = first_chapter_url
     scraped_chapters = []
@@ -235,7 +290,7 @@ def scrape_novel(novel_url, chapters_to_scrape, wait_time=0, log=None):
         if wait_time > 0:
             time.sleep(wait_time)
 
-    return novel_title, novel_author, scraped_chapters
+    return novel_title, novel_author, cover_url, scraped_chapters
 
 
 def safe_filename(title):
@@ -246,7 +301,7 @@ def safe_filename(title):
     return f"{filename or 'novelbin_novel'}.epub"
 
 
-def create_epub(novel_data, novel_title, novel_author, output_filename, log=None):
+def create_epub(novel_data, novel_title, novel_author, output_filename, cover_url=None, log=None):
     """
     Creates an EPUB file from the scraped novel data.
     """
@@ -257,6 +312,7 @@ def create_epub(novel_data, novel_title, novel_author, output_filename, log=None
     book.set_title(novel_title)
     book.set_language("en")
     book.add_author(novel_author)
+    add_cover(book, cover_url, log=log)
 
     chapters = []
     for i, chapter_data in enumerate(novel_data):
@@ -438,7 +494,7 @@ class ScraperGui:
 
     def run_scrape(self, url, chapters, wait_time, output_folder):
         try:
-            title, author, scraped_chapters = scrape_novel(
+            title, author, cover_url, scraped_chapters = scrape_novel(
                 url,
                 chapters,
                 wait_time=wait_time,
@@ -458,6 +514,7 @@ class ScraperGui:
                 title,
                 author,
                 output_filename,
+                cover_url=cover_url,
                 log=self.queue_log,
             )
             self.messages.put(("done", f"EPUB saved as {output_filename}"))
@@ -500,13 +557,13 @@ if __name__ == "__main__":
     if not args.novel_url or not args.chapters_to_scrape:
         parser.error('novel_url and chapters_to_scrape are required unless using --gui.')
 
-    title, author, chapters = scrape_novel(
+    title, author, cover_url, chapters = scrape_novel(
         args.novel_url,
         args.chapters_to_scrape,
         wait_time=args.wait,
     )
 
     if chapters:
-        create_epub(chapters, title, author, safe_filename(title))
+        create_epub(chapters, title, author, safe_filename(title), cover_url=cover_url)
     else:
         print("\nNo chapters were scraped. EPUB file will not be created.")

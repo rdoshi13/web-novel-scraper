@@ -25,6 +25,11 @@ SCRAPERS = {
         "supports_wait": True,
         "example": "https://novelbin.com/b/the-warriors-ballad/",
     },
+    "FreeWebNovel": {
+        "script": "freewebnovel.py",
+        "supports_wait": True,
+        "example": "https://freewebnovel.com/novel/the-primal-hunter",
+    },
 }
 
 

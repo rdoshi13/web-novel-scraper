@@ -10,11 +10,62 @@ from ebooklib import epub
 import time
 import argparse
 import re
+from urllib.parse import urljoin
 
 # Set up headers to mimic a browser request
 headers = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
 }
+
+def get_image_url(soup, base_url):
+    """
+    Finds the novel cover image URL from the detail page.
+    """
+    cover_tag = (
+        soup.select_one('.book img')
+        or soup.select_one('meta[property="og:image"]')
+        or soup.select_one('img[itemprop="image"]')
+    )
+    if not cover_tag:
+        return None
+
+    image_url = (
+        cover_tag.get('content')
+        or cover_tag.get('data-src')
+        or cover_tag.get('data-original')
+        or cover_tag.get('src')
+    )
+    return urljoin(base_url, image_url) if image_url else None
+
+def get_cover_filename(response):
+    """
+    Chooses a cover filename based on the response content type.
+    """
+    content_type = response.headers.get('content-type', '').lower()
+    if 'png' in content_type:
+        return 'cover.png'
+    if 'webp' in content_type:
+        return 'cover.webp'
+    return 'cover.jpg'
+
+def add_cover(book, cover_url):
+    """
+    Downloads and embeds the novel cover in the EPUB.
+    """
+    if not cover_url:
+        print("No cover image found.")
+        return
+
+    try:
+        response = requests.get(cover_url, headers=headers, timeout=20)
+        response.raise_for_status()
+        if not response.headers.get('content-type', '').lower().startswith('image/'):
+            print(f"Cover URL did not return an image: {cover_url}")
+            return
+        book.set_cover(get_cover_filename(response), response.content)
+        print(f"Added cover image: {cover_url}")
+    except requests.exceptions.RequestException as e:
+        print(f"Failed to download cover image: {e}")
 
 # Function to get the list of chapter links (with AJAX support)
 def get_chapter_links(novel_url):
@@ -89,7 +140,9 @@ def get_novel_info(novel_url):
     author_tag = soup.select_one('ul.info-meta a[href*="/authors/"]')
     author_name = author_tag.get_text(strip=True) if author_tag else "Unknown Author"
 
-    return novel_title, author_name
+    cover_url = get_image_url(soup, novel_url)
+
+    return novel_title, author_name, cover_url
 
 # Function to scrape the entire novel
 def scrape_novel(novel_url, limit=None, scrape_all=False):
@@ -118,7 +171,7 @@ def scrape_novel(novel_url, limit=None, scrape_all=False):
     return pd.DataFrame(novel_data)
 
 # Function to create an EPUB book from the scraped data
-def create_epub(novel_df, novel_title, author_name, output_filename):
+def create_epub(novel_df, novel_title, author_name, output_filename, cover_url=None):
     """
     Creates an EPUB file from a DataFrame containing novel chapters.
     """
@@ -130,6 +183,7 @@ def create_epub(novel_df, novel_title, author_name, output_filename):
     book.set_title(novel_title)
     book.set_language('en')
     book.add_author(author_name)
+    add_cover(book, cover_url)
 
     # Loop through the CSV rows and add each chapter as a section in the EPUB
     for i, row in novel_df.iterrows():
@@ -164,7 +218,7 @@ def scrape_and_convert_to_epub(novel_url, limit=None, scrape_all=False):
     Scrapes a novel and converts it to an EPUB file.
     """
     # Scrape the novel info (title and author)
-    novel_title, author_name = get_novel_info(novel_url)
+    novel_title, author_name, cover_url = get_novel_info(novel_url)
     print(f"Novel: {novel_title}, Author: {author_name}")
 
     # Scrape the novel chapters
@@ -174,7 +228,7 @@ def scrape_and_convert_to_epub(novel_url, limit=None, scrape_all=False):
     output_epub = f'{novel_title.replace(" ", "_").lower()}.epub'
     
     # Create the EPUB file
-    create_epub(novel_df, novel_title, author_name, output_epub)
+    create_epub(novel_df, novel_title, author_name, output_epub, cover_url=cover_url)
 
     print(f"Scraping and EPUB conversion complete! EPUB saved as '{output_epub}'")
 

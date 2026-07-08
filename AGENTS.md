@@ -6,7 +6,7 @@ Repository-specific guidance for coding agents working in this project.
 
 - This is a small Python web novel scraper that creates EPUB files.
 - `main.py` is the local Tkinter launcher and routes to the individual website-named scraper scripts.
-- Active scraper targets are `readnovelfull.com`, `webnoveltranslations.com`, and `novelbin.com`.
+- Active scraper targets are `readnovelfull.com`, `webnoveltranslations.com`, `novelbin.com`, and `freewebnovel.com`.
 
 ## Repository Conventions
 
@@ -46,9 +46,13 @@ Repository-specific guidance for coding agents working in this project.
   ```bash
   python novelbin.py https://novelbin.com/b/the-warriors-ballad/ 5
   ```
+- FreeWebNovel scraper:
+  ```bash
+  python freewebnovel.py https://freewebnovel.com/novel/the-primal-hunter 5
+  ```
 - Syntax check all Python files:
   ```bash
-  python -m py_compile main.py readnovelfull.py webnoveltranslations.py novelbin.py
+  python -m py_compile main.py readnovelfull.py webnoveltranslations.py novelbin.py freewebnovel.py
   ```
 
 ## Testing And Validation
@@ -65,3 +69,15 @@ Repository-specific guidance for coding agents working in this project.
 - Add or update documentation when supported sites, commands, or required dependencies change.
 - Do not modify unrelated files such as `.gitignore`, `.vscode/settings.json`, or generated cache files as part of normal scraper changes.
 - Preserve user changes in this repository; the worktree may contain uncommitted files.
+
+## Memory Protocol
+
+Before making changes: read `MEMORY.md` if present. It has architecture notes, past decisions, known gotchas, and a change log — use it instead of re-deriving context from scratch.
+
+After making a meaningful change (feature, fix, migration, refactor, dependency change with real impact): update `MEMORY.md`.
+- Add a dated entry to the top of the Change Log: what changed, why, files touched, follow-ups.
+- If you hit a gotcha (env var, flaky test, deploy quirk, non-obvious setup step), add it under Gotchas.
+- If you made an architectural call, add one line under Decisions with the reasoning.
+- Keep the Architecture section current — edit it in place rather than letting it drift from the Change Log.
+
+Don't log trivial edits (typos, formatting, comment tweaks). This file is for context a future agent would otherwise have to re-learn, not a commit log.
