@@ -5,7 +5,7 @@ import sys
 import threading
 import time
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -39,6 +39,11 @@ SCRAPERS = {
 # signal without needing to touch any of the scraper scripts.
 CHAPTER_LOG_PREFIX = "Scraping chapter"
 
+# Cap the log widget at this many lines, trimming from the top, so an "all
+# chapters" run on a 1000+ chapter novel doesn't grow the Text widget (and
+# its undo/tag bookkeeping) without bound.
+MAX_LOG_LINES = 5000
+
 PAD_S = 4
 PAD_M = 8
 PAD_L = 12
@@ -50,6 +55,16 @@ class FieldError(ValueError):
     def __init__(self, field, message):
         super().__init__(message)
         self.field = field
+
+
+def classify_log_line(line):
+    """Picks a colour tag for a log line based on its content."""
+    lower = line.strip().lower()
+    if "error" in lower or "failed" in lower or "exited with code" in lower:
+        return "error"
+    if lower.startswith("warning"):
+        return "warning"
+    return None
 
 
 class ScraperLauncher:
@@ -87,6 +102,7 @@ class ScraperLauncher:
 
         self.status_var = tk.StringVar(value="Ready.")
         self.progress_text_var = tk.StringVar(value="")
+        self.auto_scroll_var = tk.BooleanVar(value=True)
 
         self.build_styles()
         self.build()
@@ -117,7 +133,6 @@ class ScraperLauncher:
         frame = ttk.Frame(self.root, padding=PAD_L)
         frame.pack(fill=tk.BOTH, expand=True)
         frame.columnconfigure(0, weight=1)
-        frame.rowconfigure(5, weight=1)
 
         self.build_source_section(frame).grid(
             row=0, column=0, columnspan=3, sticky=tk.EW, pady=(0, PAD_M)
@@ -161,11 +176,39 @@ class ScraperLauncher:
         )
         self.progress_info_label.grid(row=0, column=1, sticky=tk.E)
 
-        self.log = tk.Text(frame, height=12, wrap=tk.WORD, state=tk.DISABLED)
-        self.log.grid(row=5, column=0, columnspan=3, sticky=tk.NSEW)
+        log_toolbar = ttk.Frame(frame)
+        log_toolbar.grid(row=5, column=0, columnspan=3, sticky=tk.EW, pady=(0, PAD_S))
+        log_toolbar.columnconfigure(3, weight=1)
+
+        ttk.Button(log_toolbar, text="Copy log", command=self.copy_log).grid(
+            row=0, column=0, sticky=tk.W
+        )
+        ttk.Button(log_toolbar, text="Save log", command=self.save_log).grid(
+            row=0, column=1, sticky=tk.W, padx=(PAD_S, 0)
+        )
+        ttk.Button(log_toolbar, text="Clear", command=self.clear_log).grid(
+            row=0, column=2, sticky=tk.W, padx=(PAD_S, 0)
+        )
+        ttk.Checkbutton(
+            log_toolbar, text="Auto-scroll", variable=self.auto_scroll_var
+        ).grid(row=0, column=4, sticky=tk.E)
+
+        frame.rowconfigure(6, weight=1)
+        self.log = tk.Text(
+            frame,
+            height=12,
+            wrap=tk.WORD,
+            state=tk.DISABLED,
+            font=tkfont.nametofont("TkFixedFont"),
+        )
+        self.log.grid(row=6, column=0, columnspan=3, sticky=tk.NSEW)
+        self.log.tag_configure("error", foreground="#c62828")
+        self.log.tag_configure("warning", foreground="#b26a00")
+        self.log.tag_configure("success", foreground="#1a7f37")
+        self.log.tag_configure("command", foreground="#6e6e6e")
 
         scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=self.log.yview)
-        scrollbar.grid(row=5, column=3, sticky=tk.NS)
+        scrollbar.grid(row=6, column=3, sticky=tk.NS)
         self.log.configure(yscrollcommand=scrollbar.set)
 
     def build_source_section(self, parent):
@@ -277,13 +320,71 @@ class ScraperLauncher:
         if folder:
             self.output_var.set(folder)
 
-    def append_log(self, message):
+    def append_log(self, message, tag=None):
+        self.append_log_segments([(message, tag)])
+
+    def append_log_segments(self, segments):
+        """Inserts (text, tag_or_None) pairs in a single Text.insert() call."""
+        if not segments:
+            return
+
+        at_bottom = self._is_log_at_bottom()
+
         self.log.configure(state=tk.NORMAL)
-        self.log.insert(tk.END, message)
-        if not message.endswith("\n"):
-            self.log.insert(tk.END, "\n")
-        self.log.see(tk.END)
+        for text, tag in segments:
+            if not text.endswith("\n"):
+                text += "\n"
+            if tag:
+                self.log.insert(tk.END, text, tag)
+            else:
+                self.log.insert(tk.END, text)
+
+        self._trim_log()
+
+        if self.auto_scroll_var.get() and at_bottom:
+            self.log.see(tk.END)
+
         self.log.configure(state=tk.DISABLED)
+
+    def _is_log_at_bottom(self):
+        _, bottom = self.log.yview()
+        return bottom >= 0.999
+
+    def _trim_log(self):
+        line_count = int(self.log.index("end-1c").split(".")[0])
+        excess = line_count - MAX_LOG_LINES
+        if excess > 0:
+            self.log.delete("1.0", f"{excess + 1}.0")
+
+    def copy_log(self):
+        content = self.log.get("1.0", tk.END)
+        self.root.clipboard_clear()
+        self.root.clipboard_append(content)
+
+    def clear_log(self):
+        self.log.configure(state=tk.NORMAL)
+        self.log.delete("1.0", tk.END)
+        self.log.configure(state=tk.DISABLED)
+
+    def save_log(self):
+        initial_dir = self.output_var.get().strip() or BASE_DIR
+        path = filedialog.asksaveasfilename(
+            initialdir=initial_dir,
+            initialfile=f"{self.site_var.get()}_scrape.log",
+            defaultextension=".log",
+            filetypes=[("Log files", "*.log"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(self.log.get("1.0", tk.END))
+        except OSError as e:
+            messagebox.showerror("Save failed", str(e))
+            return
+
+        self.set_status(f"Log saved to {path}", "success")
 
     def set_status(self, message, kind="normal"):
         self.status_var.set(message)
@@ -311,12 +412,12 @@ class ScraperLauncher:
     MAX_MESSAGES_PER_TICK = 200
 
     def flush_messages(self):
-        batched_lines = []
+        segments = []
 
         def flush_batch():
-            if batched_lines:
-                self.append_log("".join(batched_lines))
-                batched_lines.clear()
+            if segments:
+                self.append_log_segments(segments)
+                segments.clear()
 
         for _ in range(self.MAX_MESSAGES_PER_TICK):
             try:
@@ -325,18 +426,18 @@ class ScraperLauncher:
                 break
 
             if kind == "log":
-                batched_lines.append(message)
+                segments.append((message, classify_log_line(message)))
                 if message.lstrip().startswith(CHAPTER_LOG_PREFIX):
                     self.scraped_chapter_count += 1
             elif kind == "done":
                 flush_batch()
                 self.set_running(False)
-                self.append_log(message)
+                self.append_log(message, tag="success")
                 self.set_status(message, "success")
             elif kind == "error":
                 flush_batch()
                 self.set_running(False)
-                self.append_log(message)
+                self.append_log(message, tag="error")
                 self.set_status(message, "error")
                 messagebox.showerror("Error", message)
 
@@ -466,7 +567,7 @@ class ScraperLauncher:
 
         self.set_running(True)
         self.set_status(f"Scraping {self.site_var.get()}...", "normal")
-        self.append_log("$ " + " ".join(command))
+        self.append_log("$ " + " ".join(command), tag="command")
         self.append_log(f"Output folder: {output_folder}")
 
         self.worker = threading.Thread(
