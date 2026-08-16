@@ -42,6 +42,8 @@ class ScraperLauncher:
 
         self.messages = queue.Queue()
         self.process = None
+        self.process_lock = threading.Lock()
+        self.stop_requested = False
         self.worker = None
 
         self.site_var = tk.StringVar(value="NovelBin")
@@ -161,24 +163,41 @@ class ScraperLauncher:
         self.log.see(tk.END)
         self.log.configure(state=tk.DISABLED)
 
+    # Cap how many queued messages a single flush_messages() tick will drain.
+    # A buffered subprocess can dump thousands of lines into the queue at
+    # once when it finally flushes; inserting them all in one Tk callback
+    # would freeze the UI for that whole burst. Draining in bounded chunks
+    # (one chunk per 100ms tick) keeps the event loop responsive instead.
+    MAX_MESSAGES_PER_TICK = 200
+
     def flush_messages(self):
-        while True:
+        batched_lines = []
+
+        def flush_batch():
+            if batched_lines:
+                self.append_log("".join(batched_lines))
+                batched_lines.clear()
+
+        for _ in range(self.MAX_MESSAGES_PER_TICK):
             try:
                 kind, message = self.messages.get_nowait()
             except queue.Empty:
                 break
 
             if kind == "log":
-                self.append_log(message)
+                batched_lines.append(message)
             elif kind == "done":
+                flush_batch()
                 self.set_running(False)
                 self.append_log(message)
                 messagebox.showinfo("Done", message)
             elif kind == "error":
+                flush_batch()
                 self.set_running(False)
                 self.append_log(message)
                 messagebox.showerror("Error", message)
 
+        flush_batch()
         self.root.after(100, self.flush_messages)
 
     def set_running(self, running):
@@ -241,6 +260,7 @@ class ScraperLauncher:
         output_folder = self.output_var.get().strip() or BASE_DIR
         os.makedirs(output_folder, exist_ok=True)
 
+        self.stop_requested = False
         self.set_running(True)
         self.append_log("$ " + " ".join(command))
         self.append_log(f"Output folder: {output_folder}")
@@ -254,20 +274,34 @@ class ScraperLauncher:
 
     def run_command(self, command, output_folder):
         try:
-            self.process = subprocess.Popen(
+            # PYTHONUNBUFFERED forces the child's stdout to be line-buffered even
+            # though it's writing to a pipe rather than a terminal. Without it,
+            # CPython block-buffers at 8KB and the log appears to freeze until
+            # the buffer fills or the process exits.
+            env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+
+            process = subprocess.Popen(
                 command,
                 cwd=output_folder,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
+                env=env,
             )
 
-            for line in self.process.stdout:
+            with self.process_lock:
+                self.process = process
+                if self.stop_requested:
+                    process.terminate()
+
+            for line in process.stdout:
                 self.messages.put(("log", line))
 
-            return_code = self.process.wait()
-            if return_code == 0:
+            return_code = process.wait()
+            if self.stop_requested:
+                self.messages.put(("done", "Scraper stopped."))
+            elif return_code == 0:
                 self.messages.put(("done", "Scraper finished successfully."))
             else:
                 self.messages.put(("error", f"Scraper exited with code {return_code}."))
@@ -275,9 +309,16 @@ class ScraperLauncher:
             self.messages.put(("error", str(e)))
 
     def stop_scrape(self):
-        if self.process and self.process.poll() is None:
-            self.process.terminate()
-            self.append_log("Stopping scraper...")
+        with self.process_lock:
+            self.stop_requested = True
+            if self.process and self.process.poll() is None:
+                self.process.terminate()
+                self.append_log("Stopping scraper...")
+            elif self.process is None:
+                # Start was clicked but the worker thread hasn't created the
+                # process yet. run_command() checks stop_requested right after
+                # Popen() returns and will terminate it immediately.
+                self.append_log("Stopping scraper...")
 
     def run(self):
         self.root.mainloop()
