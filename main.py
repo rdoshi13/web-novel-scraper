@@ -12,6 +12,10 @@ from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+APP_VERSION = "1.0.0"
+ICON_PNG_PATH = os.path.join(BASE_DIR, "assets", "icon.png")
+ICON_ABOUT_PNG_PATH = os.path.join(BASE_DIR, "assets", "icon_128.png")
+
 SCRAPERS = {
     "ReadNovelFull": {
         "script": "readnovelfull.py",
@@ -89,6 +93,14 @@ class ScraperLauncher:
         self.root = tk.Tk()
         self.root.title("Web Novel Scraper")
 
+        # Keep references to PhotoImage objects on self - Tkinter doesn't
+        # keep its own reference, so a local-only PhotoImage gets garbage
+        # collected and the icon silently disappears.
+        self.app_icon = self.load_icon(ICON_PNG_PATH)
+        self.about_icon = self.load_icon(ICON_ABOUT_PNG_PATH)
+        if self.app_icon is not None:
+            self.root.iconphoto(True, self.app_icon)
+
         self.messages = queue.Queue()
         self.process = None
         self.process_lock = threading.Lock()
@@ -124,6 +136,7 @@ class ScraperLauncher:
         self.auto_scroll_var = tk.BooleanVar(value=True)
 
         self.build_styles()
+        self.build_menu()
         self.build()
         self.on_site_change()
         self.on_chapter_mode_change()
@@ -169,6 +182,50 @@ class ScraperLauncher:
         if self.process and self.process.poll() is None:
             self.stop_scrape()
         self.root.destroy()
+
+    def load_icon(self, path):
+        if not os.path.exists(path):
+            return None
+        try:
+            return tk.PhotoImage(file=path)
+        except tk.TclError:
+            return None
+
+    def build_menu(self):
+        menubar = tk.Menu(self.root)
+        help_menu = tk.Menu(menubar, tearoff=0)
+        help_menu.add_command(label="About Web Novel Scraper", command=self.show_about)
+        menubar.add_cascade(label="Help", menu=help_menu)
+        self.root.config(menu=menubar)
+
+    def show_about(self):
+        about = tk.Toplevel(self.root)
+        about.title("About Web Novel Scraper")
+        about.resizable(False, False)
+        about.transient(self.root)
+
+        frame = ttk.Frame(about, padding=PAD_L * 2)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        if self.about_icon is not None:
+            ttk.Label(frame, image=self.about_icon).pack(pady=(0, PAD_M))
+
+        ttk.Label(frame, text="Web Novel Scraper", font=tkfont.nametofont("TkHeadingFont")).pack()
+        ttk.Label(frame, text=f"Version {APP_VERSION}", style="Field.TLabel").pack(
+            pady=(PAD_S, PAD_M)
+        )
+        ttk.Label(
+            frame, text="Scrapes web novels into EPUB files.", style="Field.TLabel"
+        ).pack()
+
+        ttk.Button(frame, text="Close", command=about.destroy).pack(pady=(PAD_L, 0))
+
+        about.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() - about.winfo_width()) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - about.winfo_height()) // 2
+        about.geometry(f"+{x}+{y}")
+        about.grab_set()
+        about.focus_set()
 
     def build_styles(self):
         style = ttk.Style(self.root)
