@@ -1,5 +1,7 @@
+import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -43,6 +45,15 @@ CHAPTER_LOG_PREFIX = "Scraping chapter"
 # chapters" run on a 1000+ chapter novel doesn't grow the Text widget (and
 # its undo/tag bookkeeping) without bound.
 MAX_LOG_LINES = 5000
+
+# The four scrapers report the finished EPUB in one of two phrasings:
+# freewebnovel.py/novelbin.py/webnoveltranslations.py print
+# "EPUB file '<name>' created successfully.", while readnovelfull.py (and
+# freewebnovel.py a second time, from its own final print()) uses
+# "... EPUB saved as '<name>'". Match either to get the filename.
+EPUB_SAVED_RE = re.compile(r"EPUB (?:file '([^']+)' created successfully|saved as '([^']+)')")
+
+SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".web-novel-scraper.json")
 
 PAD_S = 4
 PAD_M = 8
@@ -88,13 +99,20 @@ class ScraperLauncher:
         self.scraped_chapter_count = 0
         self.chapter_target = None
         self.run_start_time = None
+        self.current_output_folder = None
+        self.last_epub_path = None
 
-        self.site_var = tk.StringVar(value="NovelBin")
-        self.url_var = tk.StringVar(value=SCRAPERS["NovelBin"]["example"])
+        settings = self.load_settings()
+        initial_site = settings.get("site")
+        if initial_site not in SCRAPERS:
+            initial_site = "NovelBin"
+
+        self.site_var = tk.StringVar(value=initial_site)
+        self.url_var = tk.StringVar(value=SCRAPERS[initial_site]["example"])
         self.chapter_mode_var = tk.StringVar(value="first")
         self.chapter_count_var = tk.StringVar(value="5")
-        self.wait_var = tk.StringVar(value="0")
-        self.output_var = tk.StringVar(value=BASE_DIR)
+        self.wait_var = tk.StringVar(value=settings.get("wait", "0"))
+        self.output_var = tk.StringVar(value=settings.get("output_folder") or BASE_DIR)
 
         self.url_error_var = tk.StringVar(value="")
         self.chapters_error_var = tk.StringVar(value="")
@@ -102,15 +120,55 @@ class ScraperLauncher:
 
         self.status_var = tk.StringVar(value="Ready.")
         self.progress_text_var = tk.StringVar(value="")
+        self.epub_path_var = tk.StringVar(value="")
         self.auto_scroll_var = tk.BooleanVar(value=True)
 
         self.build_styles()
         self.build()
         self.on_site_change()
         self.on_chapter_mode_change()
-        self.center_window(820, 640)
+
+        geometry = settings.get("geometry")
+        if geometry:
+            self.root.geometry(geometry)
+        else:
+            self.center_window(820, 640)
         self.root.minsize(760, 560)
+
+        self.root.bind("<Return>", lambda _event: self.start_scrape())
+        self.root.bind("<Escape>", lambda _event: self.stop_scrape())
+        self.root.bind("<Command-l>", lambda _event: self.clear_log())
+        self.root.bind("<Control-l>", lambda _event: self.clear_log())
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
         self.root.after(100, self.flush_messages)
+
+    def load_settings(self):
+        try:
+            with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def save_settings(self):
+        settings = {
+            "site": self.site_var.get(),
+            "output_folder": self.output_var.get().strip(),
+            "wait": self.wait_var.get().strip(),
+            "geometry": self.root.geometry(),
+        }
+        try:
+            with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+                json.dump(settings, f)
+        except OSError:
+            pass
+
+    def on_close(self):
+        self.save_settings()
+        if self.process and self.process.poll() is None:
+            self.stop_scrape()
+        self.root.destroy()
 
     def build_styles(self):
         style = ttk.Style(self.root)
@@ -120,6 +178,7 @@ class ScraperLauncher:
         style.configure("FieldError.TLabel", foreground="#c62828")
         style.configure("Field.TLabel")
         style.configure("FieldDisabled.TLabel", foreground="#999999")
+        style.configure("Link.TLabel", foreground="#0645ad")
 
     def center_window(self, width, height):
         self.root.update_idletasks()
@@ -175,6 +234,18 @@ class ScraperLauncher:
             info_frame, textvariable=self.progress_text_var, style="Field.TLabel"
         )
         self.progress_info_label.grid(row=0, column=1, sticky=tk.E)
+
+        self.link_font = tkfont.nametofont("TkDefaultFont").copy()
+        self.link_font.configure(underline=True)
+        self.epub_link_label = ttk.Label(
+            info_frame,
+            textvariable=self.epub_path_var,
+            style="Link.TLabel",
+            font=self.link_font,
+            cursor="pointinghand",
+        )
+        self.epub_link_label.grid(row=1, column=0, columnspan=2, sticky=tk.W)
+        self.epub_link_label.bind("<Button-1>", self.reveal_epub)
 
         log_toolbar = ttk.Frame(frame)
         log_toolbar.grid(row=5, column=0, columnspan=3, sticky=tk.EW, pady=(0, PAD_S))
@@ -294,12 +365,19 @@ class ScraperLauncher:
         ttk.Button(section, text="Browse", command=self.choose_output_folder).grid(
             row=0, column=2, sticky=tk.E, padx=(PAD_M, 0), pady=PAD_S
         )
+        ttk.Button(section, text="Open", command=self.open_output_folder).grid(
+            row=0, column=3, sticky=tk.E, padx=(PAD_S, 0), pady=PAD_S
+        )
 
         return section
 
     def on_site_change(self, *_):
         config = SCRAPERS[self.site_var.get()]
-        self.url_var.set(config["example"])
+
+        current_url = self.url_var.get().strip()
+        known_examples = {c["example"] for c in SCRAPERS.values()}
+        if not current_url or current_url in known_examples:
+            self.url_var.set(config["example"])
 
         supports_wait = config["supports_wait"]
         state = tk.NORMAL if supports_wait else tk.DISABLED
@@ -319,6 +397,32 @@ class ScraperLauncher:
         folder = filedialog.askdirectory(initialdir=self.output_var.get() or BASE_DIR)
         if folder:
             self.output_var.set(folder)
+
+    def open_output_folder(self):
+        folder = self.output_var.get().strip() or BASE_DIR
+        if not os.path.isdir(folder):
+            messagebox.showerror("Folder not found", f"{folder} does not exist.")
+            return
+        self._reveal_path(folder, select=False)
+
+    def reveal_epub(self, _event=None):
+        if not self.last_epub_path or not os.path.exists(self.last_epub_path):
+            return
+        self._reveal_path(self.last_epub_path, select=True)
+
+    def _reveal_path(self, path, select):
+        try:
+            if sys.platform == "darwin":
+                subprocess.run(["open", "-R", path] if select else ["open", path], check=False)
+            elif sys.platform.startswith("win"):
+                if select:
+                    subprocess.run(["explorer", "/select,", path], check=False)
+                else:
+                    os.startfile(path)
+            else:
+                subprocess.run(["xdg-open", os.path.dirname(path) if select else path], check=False)
+        except OSError as e:
+            messagebox.showerror("Couldn't open", str(e))
 
     def append_log(self, message, tag=None):
         self.append_log_segments([(message, tag)])
@@ -429,6 +533,11 @@ class ScraperLauncher:
                 segments.append((message, classify_log_line(message)))
                 if message.lstrip().startswith(CHAPTER_LOG_PREFIX):
                     self.scraped_chapter_count += 1
+                epub_match = EPUB_SAVED_RE.search(message)
+                if epub_match and self.current_output_folder:
+                    filename = epub_match.group(1) or epub_match.group(2)
+                    self.last_epub_path = os.path.join(self.current_output_folder, filename)
+                    self.epub_path_var.set(f"Open {filename}")
             elif kind == "done":
                 flush_batch()
                 self.set_running(False)
@@ -535,6 +644,9 @@ class ScraperLauncher:
             widget.focus_set()
 
     def start_scrape(self):
+        if self.is_running:
+            return
+
         self.clear_field_errors()
 
         try:
@@ -552,6 +664,9 @@ class ScraperLauncher:
         self.stop_requested = False
         self.scraped_chapter_count = 0
         self.run_start_time = time.time()
+        self.current_output_folder = output_folder
+        self.last_epub_path = None
+        self.epub_path_var.set("")
         self.chapter_target = (
             None
             if self.chapter_mode_var.get() == "all"
@@ -613,18 +728,32 @@ class ScraperLauncher:
         except Exception as e:
             self.messages.put(("error", str(e)))
 
+    # How long to give a terminated process to exit on its own before
+    # force-killing it.
+    STOP_GRACE_MS = 3000
+
     def stop_scrape(self):
         with self.process_lock:
             self.stop_requested = True
-            if self.process and self.process.poll() is None:
-                self.process.terminate()
+            process = self.process
+            if process and process.poll() is None:
+                process.terminate()
                 self.append_log("Stopping scraper...")
-            elif self.process is None:
+                self.root.after(self.STOP_GRACE_MS, lambda: self._force_kill_if_alive(process))
+            elif process is None:
                 # Start was clicked but the worker thread hasn't created the
                 # process yet. run_command() checks stop_requested right after
                 # Popen() returns and will terminate it immediately.
                 self.append_log("Stopping scraper...")
         self.set_status("Stopping...")
+
+    def _force_kill_if_alive(self, process):
+        if process.poll() is None:
+            process.kill()
+            self.append_log(
+                "Scraper didn't exit after being asked to stop; force-killed it.",
+                tag="warning",
+            )
 
     def run(self):
         self.root.mainloop()
